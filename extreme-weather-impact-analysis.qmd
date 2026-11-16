@@ -1,0 +1,105 @@
+---
+title: "Extreme Weather Impact Analysis"
+subtitle: "Identifying the impacts of extreme weather"
+author: "Eden Gonzalez"
+date: 2025-11-21
+execute: 
+  eval: true
+format: pdf
+mainfont: Helvetica
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#| warning: false
+#| message: false
+
+# Load libraries 
+library(here)
+library(stars)
+library(sf)
+library(terra)
+library(tidyverse)
+library(tmap)
+library(kableExtra)
+```
+
+
+```{r}
+# Load data
+
+huston_files <- list.files(path = "extreme-weather-impact-analysis/data/VNP46A1",
+                        pattern = "\\.tif$",
+                        full.names = TRUE)
+
+feb7a <- read_stars(huston_files[1])
+feb7b <- read_stars(huston_files[2])
+feb16a <- read_stars(huston_files[3])
+feb16b <- read_stars(huston_files[4])
+
+roads <- read_sf(here("extreme-weather-impact-analysis", "data", "gis_osm_roads_free_1.gpkg")) 
+
+houses <- read_sf(here("extreme-weather-impact-analysis", "data", "gis_osm_buildings_a_free_1.gpkg"))
+
+# texas <- st_read(here("extreme-weather-impact-analysis", "data", "ACS_2019_5YR_TRACT_48_TEXAS.gdb/"))
+```
+
+
+```{r}
+# Merge rasters for each date
+
+feb7 <- st_mosaic(feb7a, feb7b)
+feb16 <- st_mosaic(feb16a, feb16b)
+
+```
+
+
+```{r}
+difference <- feb7 - feb16
+plot(difference)
+```
+
+```{r}
+blackout_mask <- difference > 200
+plot(blackout_mask)
+```
+
+```{r}
+blackout_mask[!blackout_mask] <- NA
+plot(blackout_mask)
+```
+
+```{r}
+vectorized_blackout <- st_as_sf(blackout_mask) |> st_make_valid()
+```
+
+
+
+```{r}
+huston_coords <- cbind(
+    x = c(-96.5, -96.5, -94.5, -94.5),
+    y = c(29, 30.5, 30.5, 29)
+)
+```
+
+
+```{r}
+bbox <- st_bbox(c(xmin = -96.5, xmax = -94.5, ymin = 29, ymax = 30.5), crs = st_crs(4326))
+huston <- st_as_sf(st_as_sfc(bbox))
+```
+
+
+```{r}
+blackout_cropped <- st_crop(vectorized_blackout, huston)
+```
+
+```{r}
+tm_shape(blackout_cropped) +
+    tm_borders()
+```
+
+```{r}
+st_transform(blackout_cropped, crs = st_crs(3083))
+```
+
