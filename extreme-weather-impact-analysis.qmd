@@ -29,77 +29,139 @@ library(kableExtra)
 ```{r}
 # Load data
 
-huston_files <- list.files(path = "extreme-weather-impact-analysis/data/VNP46A1",
+huston_tifs <- list.files(path = "extreme-weather-impact-analysis/data/VNP46A1",
                         pattern = "\\.tif$",
                         full.names = TRUE)
 
-feb7a <- read_stars(huston_files[1])
-feb7b <- read_stars(huston_files[2])
-feb16a <- read_stars(huston_files[3])
-feb16b <- read_stars(huston_files[4])
+feb7a <- read_stars(huston_tifs[1])
+feb7b <- read_stars(huston_tifs[2])
+feb16a <- read_stars(huston_tifs[3])
+feb16b <- read_stars(huston_tifs[4])
 
-roads <- read_sf(here("extreme-weather-impact-analysis", "data", "gis_osm_roads_free_1.gpkg")) 
+roads_query <- "SELECT * FROM gis_osm_roads_free_1 WHERE fclass='motorway'"
+highways <- st_read(here("extreme-weather-impact-analysis", "data", "gis_osm_roads_free_1.gpkg"), query = roads_query) 
 
-houses <- read_sf(here("extreme-weather-impact-analysis", "data", "gis_osm_buildings_a_free_1.gpkg"))
+buildings_query <- "SELECT * FROM gis_osm_buildings_a_free_1 WHERE (type IS NULL AND name IS NULL) OR type in ('residential', 'apartments', 'house', 'static_caravan', 'detached')"
 
-# texas <- st_read(here("extreme-weather-impact-analysis", "data", "ACS_2019_5YR_TRACT_48_TEXAS.gdb/"))
+homes <- st_read(here("extreme-weather-impact-analysis", "data", "gis_osm_buildings_a_free_1.gpkg"), query = buildings_query)
+
 ```
 
 
 ```{r}
-# Merge rasters for each date
-
+# Merge rasters for both dates
 feb7 <- st_mosaic(feb7a, feb7b)
 feb16 <- st_mosaic(feb16a, feb16b)
-
 ```
 
-
+# Blackout mask
 ```{r}
+# Find the change in night lights 
 difference <- feb7 - feb16
-plot(difference)
-```
 
-```{r}
+# Classifying a difference greater than 200 nW cm-2sr-1 as a blackout (presumably) caused by the storm
 blackout_mask <- difference > 200
-plot(blackout_mask)
-```
 
-```{r}
+# Inspect the mask
+plot(blackout_mask)
+
+# Assign NAs to places that experienced drops less than 200 nW cm-2sr-1
 blackout_mask[!blackout_mask] <- NA
 plot(blackout_mask)
-```
 
-```{r}
+# Vectorize blackout mask
 vectorized_blackout <- st_as_sf(blackout_mask) |> st_make_valid()
 ```
 
 
-
 ```{r}
-huston_coords <- cbind(
-    x = c(-96.5, -96.5, -94.5, -94.5),
-    y = c(29, 30.5, 30.5, 29)
-)
-```
+# Coordinates for Huston area polygon
+# (-96.5, 29), (-96.5, 30.5), (-94.5, 30.5), (-94.5, 29) 
 
-
-```{r}
+# Create a bounding box from Hustoon area coordinates
 bbox <- st_bbox(c(xmin = -96.5, xmax = -94.5, ymin = 29, ymax = 30.5), crs = st_crs(4326))
+# Huston area polygon
 huston <- st_as_sf(st_as_sfc(bbox))
+
+# Crop the blackout dataset to the Huston area
+huston_blackout <- st_crop(vectorized_blackout, huston)
+plot(huston_blackout)
+
+# Reproject to NAD83 / Texas Centric Albers Equal Area
+huston_blackout <- st_transform(huston_blackout, crs = st_crs(3083))
+```
+
+
+# Exclude highways from the cropped blackout mask
+
+
+```{r}
+# Look at highways
+tm_shape(highways) +
+  tm_dots()
+```
+
+```{r}
+# Reproject highways to match huston_blackout CRS
+highways <- st_transform(highways, st_crs(huston_blackout))
 ```
 
 
 ```{r}
-blackout_cropped <- st_crop(vectorized_blackout, huston)
+# Verify that CRSs match
+if(st_crs(huston_blackout) == st_crs(highways)){
+  print("coordinate reference systems match!")
+}else{
+  warning("coordinate reference systems do NOT match")
+  print(paste("huston_blackout has ", st_crs(huston_blackout)$epsg, "EPSG"))
+  print(paste("highways has",  st_crs(highways)$epsg, "EPSG"))
+}
+```
+
+
+```{r}
+# Identify areas within 200 m of all highways
+highways_buffer <- st_buffer(highways, dist = units::set_units(200, "m"))
+# Connect all identified areas
+highways_200m <- st_union(highways_buffer)
+
+tm_shape(highways_200m) +
+  tm_polygons()
+# Identify areas that are _futher_ than 200 m from highways
+blackout_no_highways <- st_difference(huston_blackout, highways_200m)
+plot(blackout_no_highways)
+
+cat("There were", nrow(blackout_no_highways), "areas that experienced a blackout that were farther than 200 m from a highway")
+```
+
+# Identify the number of homes likely impacted by blackouts
+
+```{r}
+# Reproject homes to match huston_blackout CRS
+homes <- st_transform(homes, st_crs(huston_blackout))
 ```
 
 ```{r}
-tm_shape(blackout_cropped) +
-    tm_borders()
+# Verify that CRSs match 
+if(st_crs(huston_blackout) == st_crs(homes)){
+  print("coordinate reference systems match!")
+}else{
+  warning("coordinate reference systems do NOT match")
+  print(paste("huston_blackout has ", st_crs(huston_blackout)$epsg, "EPSG"))
+  print(paste("highways has",  st_crs(homes)$epsg, "EPSG"))
+}
+```
+
+
+```{r}
+# Crop homes to remove unnecessary data for faster processing
+huston_homes <- st_crop(homes, huston_blackout)
+
+# Select homes that overlaped with blackout areas (outside the 200 m buffer)
+blackout_homes <- huston_homes |> 
+  st_filter(y=blackout_no_highways, .predicate = st_intersects)
 ```
 
 ```{r}
-st_transform(blackout_cropped, crs = st_crs(3083))
+cat("There were", nrow(blackout_homes), "homes that experienced a blackout that were farther than 200 m from a highway")
 ```
-
